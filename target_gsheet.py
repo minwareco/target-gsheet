@@ -74,7 +74,7 @@ def emit_state(state):
         logger.debug('Emitting state {}'.format(line))
         sys.stdout.write("{}\n".format(line))
         sys.stdout.flush()
-        
+
 def get_spreadsheet(service, spreadsheet_id):
     return service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
 
@@ -108,7 +108,19 @@ def append_to_sheet(service, spreadsheet_id, range, values):
         range=range,
         valueInputOption='USER_ENTERED',
         body={'values': [values]}).execute()
-    
+
+
+def append_to_sheet_multi(service, spreadsheet_id, range, values):
+    return service.spreadsheets().values().append(
+        spreadsheetId=spreadsheet_id,
+        range=range,
+        valueInputOption='USER_ENTERED',
+        body={'values': values}).execute()
+
+def clear_range(service, spreadsheet_id, range):
+    return service.spreadsheets().values().clear(spreadsheetId=spreadsheet_id, range=range,
+        body={}).execute()
+
 def flatten(d, parent_key='', sep='__'):
     items = []
     for k, v in d.items():
@@ -119,13 +131,27 @@ def flatten(d, parent_key='', sep='__'):
             items.append((new_key, str(v) if type(v) is list else v))
     return dict(items)
 
-def persist_lines(service, spreadsheet, lines):
+STREAM_MAP = {}
+def stream_tab_map(stream):
+    global STREAM_MAP
+    if stream in STREAM_MAP:
+        #logger.info('found ' + STREAM_MAP[stream])
+        return STREAM_MAP[stream]
+    else:
+        #logger.info('not found {}, {}'.format(stream, STREAM_MAP))
+        return stream
+
+def persist_lines(service, spreadsheet, lines, clear_existing_lines):
     state = None
     schemas = {}
     key_properties = {}
 
     headers_by_stream = {}
-    
+
+    lines_by_stream = {}
+
+    logger.info('reading input records')
+    recordCount = 0
     for line in lines:
         try:
             msg = singer.parse_message(line)
@@ -134,20 +160,28 @@ def persist_lines(service, spreadsheet, lines):
             raise
 
         if isinstance(msg, singer.RecordMessage):
+            recordCount += 1
+            if recordCount % 1000 == 0:
+                logger.info('{} input records received...'.format(recordCount))
+            if recordCount > 50000:
+                raise Exception('Maximum record count of 50,000 exceeded')
+
             if msg.stream not in schemas:
                 raise Exception("A record for stream {} was encountered before a corresponding schema".format(msg.stream))
 
             schema = schemas[msg.stream]
             validate(msg.record, schema)
             flattened_record = flatten(msg.record)
-            
-            matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == msg.stream]
+
+            sheet_name = stream_tab_map(msg.stream)
+
+            matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == sheet_name]
             new_sheet_needed = len(matching_sheet) == 0
-            range_name = "{}!A1:ZZZ".format(msg.stream)
+            range_name = "{}!A1:ZZZ".format(sheet_name)
             append = functools.partial(append_to_sheet, service, spreadsheet['spreadsheetId'], range_name)
 
             if new_sheet_needed:
-                add_sheet(service, spreadsheet['spreadsheetId'], msg.stream)
+                add_sheet(service, spreadsheet['spreadsheetId'], sheet_name)
                 spreadsheet = get_spreadsheet(service, spreadsheet['spreadsheetId']) # refresh this for future iterations
                 headers_by_stream[msg.stream] = list(flattened_record.keys())
                 append(headers_by_stream[msg.stream])
@@ -160,9 +194,15 @@ def persist_lines(service, spreadsheet, lines):
                     headers_by_stream[msg.stream] = list(flattened_record.keys())
                     append(headers_by_stream[msg.stream])
 
-            result = append([flattened_record.get(x, None) for x in headers_by_stream[msg.stream]]) # order by actual headers found in sheet
+                # Clear all rows after the first row in this sheet
+                if clear_existing_lines:
+                    range_to_clear = "{}!A2:ZZZ50000".format(sheet_name)
+                    clear_range(service, spreadsheet['spreadsheetId'], range_to_clear)
 
-            state = None
+            if msg.stream not in lines_by_stream:
+                lines_by_stream[msg.stream] = []
+
+            lines_by_stream[msg.stream].append(flattened_record)
         elif isinstance(msg, singer.StateMessage):
             logger.debug('Setting state to {}'.format(msg.value))
             state = msg.value
@@ -170,7 +210,24 @@ def persist_lines(service, spreadsheet, lines):
             schemas[msg.stream] = msg.schema
             key_properties[msg.stream] = msg.key_properties
         else:
-            raise Exception("Unrecognized message {}".format(msg))
+            logger.info("Unrecognized message {}".format(msg))
+
+    logger.info('{} total input records'.format(recordCount))
+
+    for item in lines_by_stream.items():
+        msg_stream = item[0]
+        sheet_name = stream_tab_map(msg_stream)
+        range_name = "{}!A1:ZZZ".format(sheet_name)
+        append = functools.partial(append_to_sheet_multi, service, spreadsheet['spreadsheetId'],
+            range_name)
+        records = item[1]
+
+        logger.info('appending {} records for stream {}, sheet {}'.format(len(records), msg_stream, sheet_name))
+
+        inputRecords = []
+        for r in records:
+            inputRecords.append([r.get(x, None) for x in headers_by_stream[msg_stream]])
+        result = append(inputRecords) # order by actual headers found in sheet
 
     return state
 
@@ -193,11 +250,12 @@ def collect():
     except:
         logger.debug('Collection request failed')
 
-        
+
 def main():
+    global STREAM_MAP
     with open(flags.config) as input:
         config = json.load(input)
-        
+
     if not config.get('disable_collection', False):
         logger.info('Sending version information to stitchdata.com. ' +
                     'To disable sending anonymous usage data, set ' +
@@ -213,9 +271,19 @@ def main():
 
     spreadsheet = get_spreadsheet(service, config['spreadsheet_id'])
 
+    logger.info(config)
+    if 'schema_tab_map' in config:
+        STREAM_MAP = config['schema_tab_map']
+        logger.info(STREAM_MAP)
+
+    clear_existing_lines = False
+    if 'clear_existing_lines' in config:
+        clear_existing_lines = config['clear_existing_lines']
+
+
     input = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
     state = None
-    state = persist_lines(service, spreadsheet, input)
+    state = persist_lines(service, spreadsheet, input, clear_existing_lines)
     emit_state(state)
     logger.debug("Exiting normally")
 
