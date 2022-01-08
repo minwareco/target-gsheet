@@ -23,6 +23,8 @@ from oauth2client import client
 from oauth2client import tools
 from oauth2client.file import Storage
 
+MAX_RECORDS = 50000
+
 try:
     parser = argparse.ArgumentParser(parents=[tools.argparser])
     parser.add_argument('-c', '--config', help='Config file', required=True)
@@ -82,6 +84,17 @@ def get_values(service, spreadsheet_id, range):
     return service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range).execute()
 
+def batch_update_cells(service, spreadsheet_id, updateCells):
+    return service.spreadsheets().batchUpdate(
+        spreadsheetId=spreadsheet_id,
+        body={
+            'requests':[
+                {
+                    'updateCells': updateCells
+                }
+            ]
+        }).execute()
+
 def add_sheet(service, spreadsheet_id, title):
     return service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
@@ -100,7 +113,6 @@ def add_sheet(service, spreadsheet_id, title):
                 }
             ]
         }).execute()
-
 
 def append_to_sheet(service, spreadsheet_id, range, values):
     return service.spreadsheets().values().append(
@@ -141,6 +153,100 @@ def stream_tab_map(stream):
         #logger.info('not found {}, {}'.format(stream, STREAM_MAP))
         return stream
 
+def get_sheet_id(spreadsheet, sheetname):
+    found_sheet_id = None
+    for sheet in spreadsheet['sheets']:
+        if sheet['properties']['title'] == sheetname:
+            found_sheet_id = sheet['properties']['sheetId']
+            break
+    if found_sheet_id == None:
+        raise Exception('Data sheet {} not found in document'.format(sheetname))
+    return found_sheet_id
+
+PIVOT_TABLES = [
+    {
+        'name': 'By asdf',
+        'datasheet': 'Raw Data',
+        'numcols': 99,
+    },
+    #{
+    #    'name': 'By Commit',
+    #    'datasheet': 'Raw Data',
+    #    'numcols': 99,
+    #},
+    #{
+    #    'name': 'By Author',
+    #    'datasheet': 'Raw Data',
+    #    'numcols': 99,
+    #}
+]
+
+def init_pivot_tables(service, spreadsheet, should_replace = True):
+    for table in PIVOT_TABLES:
+        init_pivot_table(service, spreadsheet, table, should_replace)
+
+def init_pivot_table(service, spreadsheet, table, should_replace):
+    matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == table['name']]
+    if matching_sheet and not should_replace:
+        return
+    elif matching_sheet:
+        # Clear the sheet
+        range_to_clear = "{}!A1:ZZZ999999".format(table['name'])
+        clear_range(service, spreadsheet['spreadsheetId'], range_to_clear)
+    else:
+        # Create the sheet
+        add_sheet(service, spreadsheet['spreadsheetId'], table['name'])
+        # Refresh this
+        spreadsheet = get_spreadsheet(service, spreadsheet['spreadsheetId'])
+        matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] ==
+            table['name']]
+
+    pivot_sheet_id = get_sheet_id(spreadsheet, table['name'])
+    data_sheet_id = get_sheet_id(spreadsheet, table['datasheet'])
+
+    # Now, put a pivot table in cell A1
+    tableDef = {
+        'rows': {
+            'values': [
+                {
+                    'pivotTable': {
+                        'source': {
+                            'sheetId': data_sheet_id,
+                            'startRowIndex': 0,
+                            'startColumnIndex': 0,
+                            'endRowIndex': MAX_RECORDS,
+                            'endColumnIndex': table['numcols']
+                        },
+                        'rows': [
+                            {
+                                'sourceColumnOffset': 1,
+                                'showTotals': True,
+                                'sortOrder': 'ASCENDING',
+                            },
+                        ],
+                        'values': [
+                            {
+                                'summarizeFunction': 'COUNTA',
+                                'sourceColumnOffset': 4
+                            }
+                        ],
+                        'valueLayout': 'HORIZONTAL'
+                        'filterSpecs'
+                    }
+                }
+            ]
+        },
+        'start': {
+            'sheetId': pivot_sheet_id,
+            'rowIndex': 1,
+            'columnIndex': 0
+        },
+        'fields': 'pivotTable'
+    }
+
+    batch_update_cells(service, spreadsheet['spreadsheetId'], tableDef)
+
+
 def persist_lines(service, spreadsheet, lines, clear_existing_lines):
     state = None
     schemas = {}
@@ -161,9 +267,11 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
 
         if isinstance(msg, singer.RecordMessage):
             recordCount += 1
+            if recordCount > 10:
+                break
             if recordCount % 1000 == 0:
                 logger.info('{} input records received...'.format(recordCount))
-            if recordCount > 50000:
+            if recordCount > MAX_RECORDS:
                 raise Exception('Maximum record count of 50,000 exceeded')
 
             if msg.stream not in schemas:
@@ -222,7 +330,7 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
             range_name)
         records = item[1]
 
-        logger.info('appending {} records for stream {}, sheet {}'.format(len(records), msg_stream, sheet_name))
+        logger.info("appending {} records for stream '{}'', sheet '{}'".format(len(records), msg_stream, sheet_name))
 
         inputRecords = []
         for r in records:
@@ -282,6 +390,7 @@ def main():
 
 
     input = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
+    init_pivot_tables(service, spreadsheet)
     state = None
     state = persist_lines(service, spreadsheet, input, clear_existing_lines)
     emit_state(state)
