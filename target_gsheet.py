@@ -84,15 +84,11 @@ def get_values(service, spreadsheet_id, range):
     return service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id, range=range).execute()
 
-def batch_update_cells(service, spreadsheet_id, updateCells):
+def batch_requests(service, spreadsheet_id, requestList):
     return service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={
-            'requests':[
-                {
-                    'updateCells': updateCells
-                }
-            ]
+            'requests': requestList
         }).execute()
 
 def add_sheet(service, spreadsheet_id, title):
@@ -153,21 +149,116 @@ def stream_tab_map(stream):
         #logger.info('not found {}, {}'.format(stream, STREAM_MAP))
         return stream
 
-def get_sheet_id(spreadsheet, sheetname):
-    found_sheet_id = None
-    for sheet in spreadsheet['sheets']:
-        if sheet['properties']['title'] == sheetname:
-            found_sheet_id = sheet['properties']['sheetId']
-            break
-    if found_sheet_id == None:
-        raise Exception('Data sheet {} not found in document'.format(sheetname))
-    return found_sheet_id
+def column_width_update(sheet_id, colIdx, widthPx, numCols=1):
+    return {
+        'updateDimensionProperties': {
+            "range": {
+                "sheetId": sheet_id,
+                "dimension": "COLUMNS",
+                "startIndex": colIdx,
+                "endIndex": colIdx + numCols
+            },
+            "properties": {
+                "pixelSize": widthPx
+            },
+            "fields": "pixelSize"
+        }
+    }
+
+def freeze_columns_rows(sheet_id, numCols=1, numRows=1):
+    return {
+        'updateSheetProperties': {
+            "properties": {
+                "sheetId": sheet_id,
+                "gridProperties": {
+                    'frozenColumnCount': numCols,
+                    'frozenRowCount': numRows
+                }
+            },
+            "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+        }
+    }
+
 
 PIVOT_TABLES = [
     {
         'name': 'By asdf',
         'datasheet': 'Raw Data',
         'numcols': 99,
+        'rows': {
+            'label': 'Author Email',
+            'sourceColumnOffset': 1,
+            'sortOrder': 'DESCENDING',
+            'showTotals': True,
+            'valueBucket': {
+                'valuesIndex': 0
+            },
+        },
+        'firstColWidthPx': 280,
+        'rowcol': 1,
+        'rowlabel': 'Author Email',
+        'valueGroups': [
+            {
+                'heading': '',
+                'colWidthPx': 90,
+                'values': [
+                    {
+                        'label': 'Commit Days',
+                        'formula': '=LINES_ADDED'
+                    }
+                ]
+            },
+            {
+                'heading': 'Time from main branch commit to removal/replacement',
+                'colWidthPx': 75,
+                'values': [
+                    {
+                        'label': 'Immediate',
+                        'formula': '=REMOVED_IMMEDIATE/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 5 Minutes',
+                        'formula': '=REMOVED_WITHIN_5MINUTES/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 1 Hour',
+                        'formula': '=REMOVED_WITHIN_1HOUR/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 1 Day',
+                        'formula': '=REMOVED_WITHIN_1DAY/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 1 Week',
+                        'formula': '=REMOVED_WITHIN_1WEEK/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 30 Days',
+                        'formula': '=REMOVED_WITHIN_30DAYS/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 60 Days',
+                        'formula': '=REMOVED_WITHIN_60DAYS/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 90 Days',
+                        'formula': '=REMOVED_WITHIN_90DAYS/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 120 Days',
+                        'formula': '=REMOVED_WITHIN_120DAYS/LINES_ADDED'
+                    },
+                    {
+                        'label': '< 1 Year',
+                        'formula': '=REMOVED_WITHIN_1YEAR/LINES_ADDED'
+                    },
+                    {
+                        'label': '>= 1 Year',
+                        'formula': '=REMOVED_AFTER_1YEAR/LINES_ADDED'
+                    },
+                ]
+            },
+        ]
     },
     #{
     #    'name': 'By Commit',
@@ -201,10 +292,31 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
         matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] ==
             table['name']]
 
-    pivot_sheet_id = get_sheet_id(spreadsheet, table['name'])
-    data_sheet_id = get_sheet_id(spreadsheet, table['datasheet'])
+    pivot_sheet = matching_sheet[0]
+    data_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == table['datasheet']][0]
+
+    pivot_sheet_id = pivot_sheet['properties']['sheetId']
+    data_sheet_id = data_sheet['properties']['sheetId']
+    data_grid_properties = data_sheet['properties']['gridProperties']
 
     # Now, put a pivot table in cell A1
+    valueList = []
+    totalColCount = 0
+    colWidthCommands = []
+    for valGroup in table['valueGroups']:
+        heading = valGroup['heading']
+        colCount = len(valGroup['values'])
+        colWidthCommands.append(column_width_update(pivot_sheet_id, 1 + totalColCount,
+            valGroup['colWidthPx'], colCount))
+        for val in valGroup['values']:
+            totalColCount += 1
+            valueList.append({
+                'name': val['label'],
+                'summarizeFunction': val['summarizeFunction'] if 'summarizeFunction' in val else
+                    'sum',
+                'formula': val['formula'],
+            })
+
     tableDef = {
         'rows': {
             'values': [
@@ -214,24 +326,25 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
                             'sheetId': data_sheet_id,
                             'startRowIndex': 0,
                             'startColumnIndex': 0,
-                            'endRowIndex': MAX_RECORDS,
-                            'endColumnIndex': table['numcols']
+                            'endRowIndex': 10, #data_grid_properties['rowCount'],
+                            'endColumnIndex': data_grid_properties['columnCount'],
                         },
                         'rows': [
-                            {
-                                'sourceColumnOffset': 1,
-                                'showTotals': True,
-                                'sortOrder': 'ASCENDING',
-                            },
+                            table['rows']
                         ],
-                        'values': [
+                        'values': valueList,
+                        'valueLayout': 'HORIZONTAL',
+                        'filterSpecs': [
                             {
-                                'summarizeFunction': 'COUNTA',
-                                'sourceColumnOffset': 4
+                                'columnOffsetIndex': 1,
+                                'filterCriteria': {
+                                    'visibleByDefault': True,
+                                    'condition': {
+                                        'type': 'NOT_BLANK'
+                                    }
+                                }
                             }
                         ],
-                        'valueLayout': 'HORIZONTAL'
-                        'filterSpecs'
                     }
                 }
             ]
@@ -244,7 +357,15 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
         'fields': 'pivotTable'
     }
 
-    batch_update_cells(service, spreadsheet['spreadsheetId'], tableDef)
+    requests = [
+        { 'updateCells': tableDef },
+        column_width_update(pivot_sheet_id, 0, table['firstColWidthPx']),
+        freeze_columns_rows(pivot_sheet_id, 1, 2)
+    ]
+
+    requests.extend(colWidthCommands)
+
+    batch_requests(service, spreadsheet['spreadsheetId'], requests)
 
 
 def persist_lines(service, spreadsheet, lines, clear_existing_lines):
@@ -379,10 +500,9 @@ def main():
 
     spreadsheet = get_spreadsheet(service, config['spreadsheet_id'])
 
-    logger.info(config)
     if 'schema_tab_map' in config:
         STREAM_MAP = config['schema_tab_map']
-        logger.info(STREAM_MAP)
+        logger.info('Input stream map: {}'.format(STREAM_MAP))
 
     clear_existing_lines = False
     if 'clear_existing_lines' in config:
