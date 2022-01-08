@@ -85,6 +85,7 @@ def get_values(service, spreadsheet_id, range):
         spreadsheetId=spreadsheet_id, range=range).execute()
 
 def batch_requests(service, spreadsheet_id, requestList):
+    #logger.info(requestList)
     return service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,
         body={
@@ -179,10 +180,277 @@ def freeze_columns_rows(sheet_id, numCols=1, numRows=1):
         }
     }
 
+def merge_cells(sheet_id, startCol=0, startRow=0, numCols=1, numRows=1):
+    return {
+        'mergeCells': {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": startRow,
+                "endRowIndex": startRow + numRows,
+                "startColumnIndex": startCol,
+                "endColumnIndex": startCol + numCols,
+            },
+            "mergeType": "MERGE_ALL",
+        }
+    }
+
+FORMAT_DECIMAL3 = '#####0.000'
+FORMAT_PERCENT1 = '##0.0%'
+def format_cells(sheet_id, format, formatType='NUMBER', startCol=0, startRow=0, numCols=1, numRows=1):
+    return {
+        'repeatCell': {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": startRow,
+                "endRowIndex": startRow + numRows,
+                "startColumnIndex": startCol,
+                "endColumnIndex": startCol + numCols,
+            },
+            'cell': {
+                "userEnteredFormat": {
+                    "numberFormat": {
+                        "type": formatType, # NUMBER, PERCENT, DATE, TEXT, etc., see:
+                        # https://developers.google.com/sheets/api/reference/rest/v4/spreadsheets/cells#NumberFormat
+                        "pattern": format, # See:
+                        # https://developers.google.com/sheets/api/guides/formats
+                    },
+                },
+            },
+            "fields": "userEnteredFormat.numberFormat",
+        },
+    }
+
+def set_column_left_border(sheet_id, startCol=0, startRow=0, numRows=1, borderStyle='SOLID'):
+    return {
+        'updateBorders': {
+            "range": {
+                "sheetId": sheet_id,
+                "startRowIndex": startRow,
+                "endRowIndex": startRow + numRows,
+                "startColumnIndex": startCol,
+                "endColumnIndex": startCol + 1,
+            },
+            "left": {
+                "style": borderStyle,
+                "width": 1,
+                "color": COLOR_BLACK,
+            },
+        },
+    }
+
+COLOR_BLACK = {'red': 0, 'green': 0, 'blue': 0}
+COLOR_WHITE = {'red': 1, 'green': 1, 'blue': 1}
+COLOR_BLUE_80 = {'red': .8, 'green': .8, 'blue': 1}
+COLOR_GREEN_80 = {'red': .8, 'green': 1, 'blue': .8}
+COLOR_GREEN_0 = {'red': 0, 'green': .7, 'blue': 0}
+COLOR_YELLOW_0 = {'red': .85, 'green': .85, 'blue': 0.2}
+COLOR_RED_70 = {'red': 1, 'green': .7, 'blue': .7}
+COLOR_YELLOW_70 = {'red': 1, 'green': 1, 'blue': .7}
+COLOR_MAGENTA_70 = {'red': 1, 'green': .7, 'blue': 1}
+COLOR_CYAN_70 = {'red': .7, 'green': 1, 'blue': 1}
+ALTERNATING_COLORS = [
+    COLOR_BLUE_80,
+    COLOR_GREEN_80,
+    COLOR_MAGENTA_70,
+    COLOR_CYAN_70,
+]
+
+def update_cells(sheet_id, values, startCol=0, startRow=0, bgColor=COLOR_WHITE, halign='CENTER'):
+    # Nest in lists if not explicitly wrapped
+    if not isinstance(values, list):
+        values = [values]
+    if not isinstance(values[0], list):
+        values = [values]
+    
+    rows = []
+    for row in values:
+        rowObject = {
+            'values': []
+        }
+        for colVal in row:
+            rowObject['values'].append({
+                'userEnteredValue': {'stringValue': colVal},
+                'userEnteredFormat': {
+                    # TODO LATER MAYBE: use theme colors instead?
+                    'backgroundColor': bgColor,
+                    'horizontalAlignment': halign, # LEFT, CENTER, or RIGHT
+                }
+            })
+        rows.append(rowObject)
+
+    return {
+        'updateCells': {
+            'rows': rows,
+            'fields': 'userEnteredValue,userEnteredFormat',
+            'start': {
+                'sheetId': sheet_id,
+                'rowIndex': startRow,
+                'columnIndex': startCol,
+            },
+        },
+    }
+
+def conditional_format(sheet_id, startCol=0, startRow=0, numCols=1, numRows=1,
+        maxColor=COLOR_GREEN_0, percentile=False):
+    gradientRule = {
+        "minpoint": {
+            "color": COLOR_WHITE,
+            "type": "NUMBER",
+            "value": '0',
+        },
+    }
+    if percentile:
+        gradientRule['maxpoint'] = {
+            "color": maxColor,
+            "type": "PERCENTILE",
+            "value": '90',
+        }
+    else:
+        gradientRule['maxpoint'] = {
+            "color": maxColor,
+            "type": "MAX",
+        }
+        '''
+        midColor = {
+            'red': (1 + maxColor['red']) / 2,
+            'green': (1 + maxColor['green']) / 2,
+            'blue': (1 + maxColor['blue']) / 2,
+        }
+        gradientRule['midpoint'] = {
+            "color": midColor,
+            "type": "PERCENT",
+            "value": '25',
+        }
+        '''
+    
+    return {
+        'addConditionalFormatRule': {
+            'rule': {
+                'ranges': [
+                    {
+                        'sheetId': sheet_id,
+                        'startRowIndex': startRow,
+                        'startColumnIndex': startCol,
+                        'endRowIndex': startRow + numRows,
+                        'endColumnIndex': startCol + numCols,
+                    },
+                ],
+                "gradientRule": gradientRule,
+            },
+            'index': 0,
+        },
+    }
+    
+def delete_conditional_format(sheet_id, idx):
+    return {
+        "deleteConditionalFormatRule": {
+            "sheetId": sheet_id,
+            "index": idx,
+        }
+    }
+
+VAL_GROUPS = {
+    'LONGEVITY': [
+        {
+            'heading': '',
+            'colWidthPx': 90,
+            'formatType': 'NUMBER',
+            'format': FORMAT_DECIMAL3,
+            'maxColor': COLOR_GREEN_0,
+            'colorPercentile': True,
+            'values': [
+                {
+                    'label': 'Commit Days',
+                    'formula': '=LINES_ADDED'
+                }
+            ]
+        },
+        {
+            'heading': 'Time from main branch commit to removal/replacement',
+            'colWidthPx': 75,
+            'formatType': 'PERCENT',
+            'format': FORMAT_PERCENT1,
+            'maxColor': COLOR_YELLOW_0,
+            'values': [
+                {
+                    'label': 'Immediate',
+                    'formula': '=REMOVED_IMMEDIATE/LINES_ADDED'
+                },
+                {
+                    'label': '< 5 Minutes',
+                    'formula': '=REMOVED_WITHIN_5MINUTES/LINES_ADDED'
+                },
+                {
+                    'label': '< 1 Hour',
+                    'formula': '=REMOVED_WITHIN_1HOUR/LINES_ADDED'
+                },
+                {
+                    'label': '< 1 Day',
+                    'formula': '=REMOVED_WITHIN_1DAY/LINES_ADDED'
+                },
+                {
+                    'label': '< 1 Week',
+                    'formula': '=REMOVED_WITHIN_1WEEK/LINES_ADDED'
+                },
+                {
+                    'label': '< 30 Days',
+                    'formula': '=REMOVED_WITHIN_30DAYS/LINES_ADDED'
+                },
+                {
+                    'label': '< 60 Days',
+                    'formula': '=REMOVED_WITHIN_60DAYS/LINES_ADDED'
+                },
+                {
+                    'label': '< 90 Days',
+                    'formula': '=REMOVED_WITHIN_90DAYS/LINES_ADDED'
+                },
+                {
+                    'label': '< 120 Days',
+                    'formula': '=REMOVED_WITHIN_120DAYS/LINES_ADDED'
+                },
+                {
+                    'label': '< 1 Year',
+                    'formula': '=REMOVED_WITHIN_1YEAR/LINES_ADDED'
+                },
+                {
+                    'label': '>= 1 Year',
+                    'formula': '=REMOVED_AFTER_1YEAR/LINES_ADDED'
+                },
+            ]
+        },
+        {
+            'heading': 'Survival rate',
+            'colWidthPx': 100,
+            'formatType': 'PERCENT',
+            'format': FORMAT_PERCENT1,
+            'maxColor': COLOR_GREEN_0,
+            'values': [
+                {
+                    'label': '1-Year Survival',
+                    'formula': '=1-REMOVED_LT_1YEAR/LINES_ADDED'
+                },
+                {
+                    'label': 'Still Surviving',
+                    'formula': '=LINES_REMAINING/LINES_ADDED'
+                },
+            ],
+        },
+        {
+            'heading': '',
+            'colWidthPx': 85,
+            'values': [
+                {
+                    'label': 'Lines Added',
+                    'formula': '=ORIG_LINES_ADDED'
+                },
+            ],
+        },
+    ]
+}
 
 PIVOT_TABLES = [
     {
-        'name': 'By asdf',
+        'name': 'By Author',
         'datasheet': 'Raw Data',
         'numcols': 99,
         'rows': {
@@ -197,68 +465,49 @@ PIVOT_TABLES = [
         'firstColWidthPx': 280,
         'rowcol': 1,
         'rowlabel': 'Author Email',
-        'valueGroups': [
-            {
-                'heading': '',
-                'colWidthPx': 90,
-                'values': [
-                    {
-                        'label': 'Commit Days',
-                        'formula': '=LINES_ADDED'
-                    }
-                ]
+        'valueGroups': VAL_GROUPS['LONGEVITY'],
+    },
+    {
+        'name': 'By Commit',
+        'datasheet': 'Raw Data',
+        'numcols': 99,
+        'rows': {
+            'label': 'Commit Hash',
+            'sourceColumnOffset': 4,
+            'sortOrder': 'DESCENDING',
+            'showTotals': True,
+            'valueBucket': {
+                'valuesIndex': len(VAL_GROUPS['LONGEVITY'][0]['values']) +
+                    len(VAL_GROUPS['LONGEVITY'][1]['values']) +
+                    len(VAL_GROUPS['LONGEVITY'][2]['values'])
             },
-            {
-                'heading': 'Time from main branch commit to removal/replacement',
-                'colWidthPx': 75,
-                'values': [
-                    {
-                        'label': 'Immediate',
-                        'formula': '=REMOVED_IMMEDIATE/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 5 Minutes',
-                        'formula': '=REMOVED_WITHIN_5MINUTES/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 1 Hour',
-                        'formula': '=REMOVED_WITHIN_1HOUR/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 1 Day',
-                        'formula': '=REMOVED_WITHIN_1DAY/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 1 Week',
-                        'formula': '=REMOVED_WITHIN_1WEEK/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 30 Days',
-                        'formula': '=REMOVED_WITHIN_30DAYS/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 60 Days',
-                        'formula': '=REMOVED_WITHIN_60DAYS/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 90 Days',
-                        'formula': '=REMOVED_WITHIN_90DAYS/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 120 Days',
-                        'formula': '=REMOVED_WITHIN_120DAYS/LINES_ADDED'
-                    },
-                    {
-                        'label': '< 1 Year',
-                        'formula': '=REMOVED_WITHIN_1YEAR/LINES_ADDED'
-                    },
-                    {
-                        'label': '>= 1 Year',
-                        'formula': '=REMOVED_AFTER_1YEAR/LINES_ADDED'
-                    },
-                ]
+        },
+        'firstColWidthPx': 300,
+        'rowcol': 1,
+        'rowlabel': 'Commit Hash',
+        'valueGroups': VAL_GROUPS['LONGEVITY'],
+    },
+    {
+        'name': 'By Date',
+        'datasheet': 'Raw Data',
+        'numcols': 99,
+        'rows': {
+            'label': 'Week Start',
+            'sourceColumnOffset': 19,
+            'sortOrder': 'ASCENDING',
+            'showTotals': True,
+            'valueBucket': {
+                      "buckets": [
+                        {
+                          "stringValue": "WEEK_START"
+                        }
+                      ]
             },
-        ]
+        },
+        'firstColWidthPx': 100,
+        'rowcol': 1,
+        'rowlabel': 'Week Start',
+        'valueGroups': VAL_GROUPS['LONGEVITY'],
     },
     #{
     #    'name': 'By Commit',
@@ -299,15 +548,43 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
     data_sheet_id = data_sheet['properties']['sheetId']
     data_grid_properties = data_sheet['properties']['gridProperties']
 
+    requests = []
+    requests.append(column_width_update(pivot_sheet_id, 0, table['firstColWidthPx']))
+    requests.append(freeze_columns_rows(pivot_sheet_id, 1, 2))
+    ct = 0
+    if 'conditionalFormats' in pivot_sheet:
+        for fmt in pivot_sheet['conditionalFormats']:
+            requests.append(delete_conditional_format(pivot_sheet_id, 0))
+            ct += 1
+
     # Now, put a pivot table in cell A1
     valueList = []
     totalColCount = 0
-    colWidthCommands = []
+    groupColorIdx = 0
+    formatNumRows = data_grid_properties['rowCount']
     for valGroup in table['valueGroups']:
         heading = valGroup['heading']
         colCount = len(valGroup['values'])
-        colWidthCommands.append(column_width_update(pivot_sheet_id, 1 + totalColCount,
+        requests.append(column_width_update(pivot_sheet_id, 1 + totalColCount,
             valGroup['colWidthPx'], colCount))
+        if colCount > 1:
+            requests.append(merge_cells(pivot_sheet_id, startCol=1+totalColCount, numCols=colCount))
+        requests.append(set_column_left_border(pivot_sheet_id, startCol=1+totalColCount,
+            numRows=formatNumRows))
+        if heading:
+            bgColor = ALTERNATING_COLORS[groupColorIdx]
+            requests.append(update_cells(pivot_sheet_id, heading, 1 + totalColCount, bgColor=bgColor))
+            groupColorIdx += 1
+        if 'format' in valGroup:
+            requests.append(format_cells(pivot_sheet_id, valGroup['format'], valGroup['formatType'],
+                startRow=1, numRows=formatNumRows, startCol=1+totalColCount,
+                numCols=colCount))
+        if 'maxColor' in valGroup:
+            percentile = False
+            if 'colorPercentile' in valGroup and valGroup['colorPercentile']:
+                percentile = True
+            requests.append(conditional_format(pivot_sheet_id, maxColor=valGroup['maxColor'], startRow=2,
+                numRows=formatNumRows, startCol=1+totalColCount, numCols=colCount, percentile=percentile))
         for val in valGroup['values']:
             totalColCount += 1
             valueList.append({
@@ -316,6 +593,9 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
                     'sum',
                 'formula': val['formula'],
             })
+    # Right border at the end
+    requests.append(set_column_left_border(pivot_sheet_id, startCol=1+totalColCount,
+        numRows=formatNumRows))
 
     tableDef = {
         'rows': {
@@ -326,7 +606,7 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
                             'sheetId': data_sheet_id,
                             'startRowIndex': 0,
                             'startColumnIndex': 0,
-                            'endRowIndex': 10, #data_grid_properties['rowCount'],
+                            'endRowIndex': data_grid_properties['rowCount'],
                             'endColumnIndex': data_grid_properties['columnCount'],
                         },
                         'rows': [
@@ -357,13 +637,7 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
         'fields': 'pivotTable'
     }
 
-    requests = [
-        { 'updateCells': tableDef },
-        column_width_update(pivot_sheet_id, 0, table['firstColWidthPx']),
-        freeze_columns_rows(pivot_sheet_id, 1, 2)
-    ]
-
-    requests.extend(colWidthCommands)
+    requests.append({ 'updateCells': tableDef })
 
     batch_requests(service, spreadsheet['spreadsheetId'], requests)
 
@@ -388,8 +662,6 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
 
         if isinstance(msg, singer.RecordMessage):
             recordCount += 1
-            if recordCount > 10:
-                break
             if recordCount % 1000 == 0:
                 logger.info('{} input records received...'.format(recordCount))
             if recordCount > MAX_RECORDS:
@@ -510,9 +782,11 @@ def main():
 
 
     input = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
-    init_pivot_tables(service, spreadsheet)
     state = None
+    # TODO: initialize empty raw data sheet with column order if it doesn't exist
     state = persist_lines(service, spreadsheet, input, clear_existing_lines)
+    spreadsheet = get_spreadsheet(service, config['spreadsheet_id'])
+    init_pivot_tables(service, spreadsheet)
     emit_state(state)
     logger.debug("Exiting normally")
 
