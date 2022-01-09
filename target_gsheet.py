@@ -720,7 +720,7 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
                 sheet_name = stream_tab_map(msg.stream)
                 matching_sheet = get_sheet_by_name(spreadsheet, sheet_name)
 
-                # If the sheet matches and we aren't clearing it
+                # If the sheet matches but we are clearing it, then do that now
                 if matching_sheet and clear_existing_sheet:
                     range_to_clear = "{}!A1:ZZZ{}".format(sheet_name, MAX_RECORDS + 1)
                     clear_range(service, spreadsheet['spreadsheetId'], range_to_clear)
@@ -731,22 +731,22 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
                     # refresh this for future iterations
                     spreadsheet = get_spreadsheet(service, spreadsheet['spreadsheetId'])
 
-                # Sort the heading keys according to the config
+                # Sort the heading keys according to the config, otherwise leave then in the order
+                # of the first record
                 keylist = list(flattened_record.keys())
                 if 'sortOrder' in sheet_config:
                     sortOrder = sheet_config['sortOrder']
                     keylist.sort(key=lambda x: x if not x in sortOrder else sortOrder.index(x))
 
-                # Extract or save values from first fow
+                # Extract and save headers from the first fow if we aren't clearing the sheet
                 range_name = "{}!A1:ZZZ".format(sheet_name)
                 first_row = {} if clear_existing_sheet else \
                     get_values(service, spreadsheet['spreadsheetId'], range_name + '1')
                 if 'values' in first_row:
-                    # Headings exist and we are not clearing the sheet
+                    # Headings exist and we are not clearing the sheet, save them
                     headers_by_stream[msg.stream] = first_row.get('values', None)[0]
                 else:
-                    # We are clearing the sheet or headings don't exist
-                    # Write them out to the file
+                    # We are clearing the sheet or headings don't exist, write them out to the sheet
                     append_to_sheet(service, spreadsheet['spreadsheetId'], range_name, keylist)
 
                     # Save for sorting values at the end
@@ -777,7 +777,7 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
         inputRecords = []
         for r in records:
             inputRecords.append([r.get(x, None) for x in headers_by_stream[msg_stream]])
-        result = append(inputRecords) # order by actual headers found in sheet
+        append(inputRecords) # order by actual headers found in sheet
 
     return [state, headers_by_stream]
 
