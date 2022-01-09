@@ -400,6 +400,9 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
     # Freeze rows/columns
     requests.append(freeze_columns_rows(pivot_sheet_id, 1, 2))
 
+    # Probably shouldn't do this here, but freeze the data shee headers too
+    requests.append(freeze_columns_rows(data_sheet_id, 0, 1))
+
     # Cleat existing conditional format rules
     ct = 0
     if 'conditionalFormats' in pivot_sheet:
