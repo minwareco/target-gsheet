@@ -103,7 +103,8 @@ def add_sheet(service, spreadsheet_id, title):
                         'title': title,
                         'gridProperties': {
                             'rowCount': 1000,
-                            'columnCount': 26
+                            # TODO: compute number of columms dynamically
+                            'columnCount': 50,
                         }
                     }
                     }
@@ -184,6 +185,19 @@ def freeze_columns_rows(sheet_id, numCols=1, numRows=1):
                 }
             },
             "fields": "gridProperties.frozenRowCount,gridProperties.frozenColumnCount"
+        }
+    }
+
+def set_number_columns(sheet_id, numCols):
+    return {
+        'updateSheetProperties': {
+            "properties": {
+                "sheetId": sheet_id,
+                "gridProperties": {
+                    'columnCount': numCols,
+                }
+            },
+            "fields": "gridProperties.columnCount"
         }
     }
 
@@ -394,11 +408,14 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
 
     requests = []
 
+    # TODO: determine number of columns dynamically
+    requests.append(set_number_columns(pivot_sheet_id, 50))
+
     # Set width of first column
     requests.append(column_width_update(pivot_sheet_id, 0, table['firstColWidthPx']))
 
     # Freeze rows/columns
-    requests.append(freeze_columns_rows(pivot_sheet_id, 1, 2))
+    requests.append(freeze_columns_rows(pivot_sheet_id, 2, 2))
 
     # Probably shouldn't do this here, but freeze the data shee headers too
     requests.append(freeze_columns_rows(data_sheet_id, 0, 1))
@@ -409,6 +426,8 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
         for fmt in pivot_sheet['conditionalFormats']:
             requests.append(delete_conditional_format(pivot_sheet_id, 0))
             ct += 1
+    
+    # TODO: clear merged columns or we will have problems if the column count changes
 
     # Now, put a pivot table in cell A1
     valueList = []
@@ -421,7 +440,8 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
         requests.append(column_width_update(pivot_sheet_id, 1 + totalColCount,
             valGroup['colWidthPx'], colCount))
         if colCount > 1:
-            requests.append(merge_cells(pivot_sheet_id, startCol=1+totalColCount, numCols=colCount))
+            mergeCommand = merge_cells(pivot_sheet_id, startCol=1+totalColCount, numCols=colCount)
+            requests.append(mergeCommand)
         requests.append(set_column_left_border(pivot_sheet_id, startCol=1+totalColCount,
             numRows=formatNumRows))
         if heading and 'alternatingColors' in sheet_config and \
@@ -556,7 +576,8 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
                 keylist = list(flattened_record.keys())
                 if 'sortOrder' in sheet_config:
                     sortOrder = sheet_config['sortOrder']
-                    keylist.sort(key=lambda x: x if not x in sortOrder else sortOrder.index(x))
+                    keylist.sort(key=lambda x: x if not x in sortOrder else \
+                        "{:05d}".format(sortOrder.index(x)))
 
                 # Extract and save headers from the first fow if we aren't clearing the sheet
                 range_name = "{}!A1:ZZZ".format(sheet_name)
