@@ -150,6 +150,13 @@ def stream_tab_map(stream):
         #logger.info('not found {}, {}'.format(stream, STREAM_MAP))
         return stream
 
+def get_sheet_by_name(spreadsheet, sheet_name):
+    sheetList = [s for s in spreadsheet['sheets'] if s['properties']['title'] == sheet_name]
+    if len(sheetList) == 0:
+        return None
+    else:
+        return sheetList[0]
+
 def column_width_update(sheet_id, colIdx, widthPx, numCols=1):
     return {
         'updateDimensionProperties': {
@@ -261,7 +268,7 @@ def update_cells(sheet_id, values, startCol=0, startRow=0, bgColor=COLOR_WHITE, 
         values = [values]
     if not isinstance(values[0], list):
         values = [values]
-    
+
     rows = []
     for row in values:
         rowObject = {
@@ -322,7 +329,7 @@ def conditional_format(sheet_id, startCol=0, startRow=0, numCols=1, numRows=1,
             "value": '25',
         }
         '''
-    
+
     return {
         'addConditionalFormatRule': {
             'rule': {
@@ -340,7 +347,7 @@ def conditional_format(sheet_id, startCol=0, startRow=0, numCols=1, numRows=1,
             'index': 0,
         },
     }
-    
+
 def delete_conditional_format(sheet_id, idx):
     return {
         "deleteConditionalFormatRule": {
@@ -455,11 +462,11 @@ PIVOT_TABLES = [
         'numcols': 99,
         'rows': {
             'label': 'Author Email',
-            'sourceColumnOffset': 1,
+            'sourceColumnOffset': 'AUTHOR_NAME', # Will be replaced
             'sortOrder': 'DESCENDING',
             'showTotals': True,
             'valueBucket': {
-                'valuesIndex': 0
+                'valuesIndex': 'Commit Days', # Will be replaced
             },
         },
         'firstColWidthPx': 280,
@@ -473,13 +480,11 @@ PIVOT_TABLES = [
         'numcols': 99,
         'rows': {
             'label': 'Commit Hash',
-            'sourceColumnOffset': 4,
+            'sourceColumnOffset': 'ORIG_COMMIT_ID', # Will be replaced
             'sortOrder': 'DESCENDING',
             'showTotals': True,
             'valueBucket': {
-                'valuesIndex': len(VAL_GROUPS['LONGEVITY'][0]['values']) +
-                    len(VAL_GROUPS['LONGEVITY'][1]['values']) +
-                    len(VAL_GROUPS['LONGEVITY'][2]['values'])
+                'valuesIndex': 'Lines Added', # Will be repalced
             },
         },
         'firstColWidthPx': 300,
@@ -493,15 +498,15 @@ PIVOT_TABLES = [
         'numcols': 99,
         'rows': {
             'label': 'Week Start',
-            'sourceColumnOffset': 19,
+            'sourceColumnOffset': 'WEEKSTART', # Will be replaced
             'sortOrder': 'ASCENDING',
             'showTotals': True,
             'valueBucket': {
-                      "buckets": [
-                        {
-                          "stringValue": "WEEK_START"
-                        }
-                      ]
+                "buckets": [
+                    {
+                        "stringValue": "WEEKSTART"
+                    },
+                ],
             },
         },
         'firstColWidthPx': 100,
@@ -521,11 +526,36 @@ PIVOT_TABLES = [
     #}
 ]
 
-def init_pivot_tables(service, spreadsheet, should_replace = True):
+def init_pivot_tables(service, spreadsheet, sheet_config, headerList, should_replace = True):
     for table in PIVOT_TABLES:
-        init_pivot_table(service, spreadsheet, table, should_replace)
+        init_pivot_table(service, spreadsheet, sheet_config, headerList, table, should_replace)
 
-def init_pivot_table(service, spreadsheet, table, should_replace):
+def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, should_replace):
+    # Fill in names in sheet definition with column indexes where necessary
+    if isinstance(table['rows']['sourceColumnOffset'], str):
+        colname = table['rows']['sourceColumnOffset']
+        try:
+            table['rows']['sourceColumnOffset'] = headerList.index(colname)
+        except ValueError as e:
+            logger.info('{} not in header list: {}'.format(colname, headerList))
+            raise e
+    if 'valuesIndex' in table['rows']['valueBucket'] and \
+            isinstance(table['rows']['valueBucket']['valuesIndex'], str):
+        valueLabel = table['rows']['valueBucket']['valuesIndex']
+        curIdx = 0
+        found = False
+        for valueGroup in table['valueGroups']:
+            for col in valueGroup['values']:
+                if col['label'] == valueLabel:
+                    table['rows']['valueBucket']['valuesIndex'] = curIdx
+                    found = True
+                    break
+                curIdx += 1
+        if not found:
+            raise Exception('Value with label {} not found in valueGroups when resolving '\
+                'valuesIndex'.format(valueLabel))
+
+    # Get the or create the sheet for this pivot table
     matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == table['name']]
     if matching_sheet and not should_replace:
         return
@@ -549,8 +579,14 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
     data_grid_properties = data_sheet['properties']['gridProperties']
 
     requests = []
+
+    # Set width of first column
     requests.append(column_width_update(pivot_sheet_id, 0, table['firstColWidthPx']))
+
+    # Freeze rows/columns
     requests.append(freeze_columns_rows(pivot_sheet_id, 1, 2))
+
+    # Cleat existing conditional format rules
     ct = 0
     if 'conditionalFormats' in pivot_sheet:
         for fmt in pivot_sheet['conditionalFormats']:
@@ -642,7 +678,7 @@ def init_pivot_table(service, spreadsheet, table, should_replace):
     batch_requests(service, spreadsheet['spreadsheetId'], requests)
 
 
-def persist_lines(service, spreadsheet, lines, clear_existing_lines):
+def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_sheet):
     state = None
     schemas = {}
     key_properties = {}
@@ -653,6 +689,7 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
 
     logger.info('reading input records')
     recordCount = 0
+
     for line in lines:
         try:
             msg = singer.parse_message(line)
@@ -662,10 +699,12 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
 
         if isinstance(msg, singer.RecordMessage):
             recordCount += 1
+            if recordCount > 100:
+                break
             if recordCount % 1000 == 0:
                 logger.info('{} input records received...'.format(recordCount))
             if recordCount > MAX_RECORDS:
-                raise Exception('Maximum record count of 50,000 exceeded')
+                raise Exception('Maximum record count of {} exceeded'.format(MAX_RECORDS))
 
             if msg.stream not in schemas:
                 raise Exception("A record for stream {} was encountered before a corresponding schema".format(msg.stream))
@@ -674,34 +713,44 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
             validate(msg.record, schema)
             flattened_record = flatten(msg.record)
 
-            sheet_name = stream_tab_map(msg.stream)
-
-            matching_sheet = [s for s in spreadsheet['sheets'] if s['properties']['title'] == sheet_name]
-            new_sheet_needed = len(matching_sheet) == 0
-            range_name = "{}!A1:ZZZ".format(sheet_name)
-            append = functools.partial(append_to_sheet, service, spreadsheet['spreadsheetId'], range_name)
-
-            if new_sheet_needed:
-                add_sheet(service, spreadsheet['spreadsheetId'], sheet_name)
-                spreadsheet = get_spreadsheet(service, spreadsheet['spreadsheetId']) # refresh this for future iterations
-                headers_by_stream[msg.stream] = list(flattened_record.keys())
-                append(headers_by_stream[msg.stream])
-
-            elif msg.stream not in headers_by_stream:
-                first_row = get_values(service, spreadsheet['spreadsheetId'], range_name + '1')
-                if 'values' in first_row:
-                    headers_by_stream[msg.stream] = first_row.get('values', None)[0]
-                else:
-                    headers_by_stream[msg.stream] = list(flattened_record.keys())
-                    append(headers_by_stream[msg.stream])
-
-                # Clear all rows after the first row in this sheet
-                if clear_existing_lines:
-                    range_to_clear = "{}!A2:ZZZ50000".format(sheet_name)
-                    clear_range(service, spreadsheet['spreadsheetId'], range_to_clear)
-
+            # For the first line associated with a stream, initialize the table
             if msg.stream not in lines_by_stream:
                 lines_by_stream[msg.stream] = []
+
+                sheet_name = stream_tab_map(msg.stream)
+                matching_sheet = get_sheet_by_name(spreadsheet, sheet_name)
+
+                # If the sheet matches and we aren't clearing it
+                if matching_sheet and clear_existing_sheet:
+                    range_to_clear = "{}!A1:ZZZ{}".format(sheet_name, MAX_RECORDS + 1)
+                    clear_range(service, spreadsheet['spreadsheetId'], range_to_clear)
+
+                # Create an entirely new sheet if necessary
+                if not matching_sheet:
+                    add_sheet(service, spreadsheet['spreadsheetId'], sheet_name)
+                    # refresh this for future iterations
+                    spreadsheet = get_spreadsheet(service, spreadsheet['spreadsheetId'])
+
+                # Sort the heading keys according to the config
+                keylist = list(flattened_record.keys())
+                if 'sortOrder' in sheet_config:
+                    sortOrder = sheet_config['sortOrder']
+                    keylist.sort(key=lambda x: x if not x in sortOrder else sortOrder.index(x))
+
+                # Extract or save values from first fow
+                range_name = "{}!A1:ZZZ".format(sheet_name)
+                first_row = {} if clear_existing_sheet else \
+                    get_values(service, spreadsheet['spreadsheetId'], range_name + '1')
+                if 'values' in first_row:
+                    # Headings exist and we are not clearing the sheet
+                    headers_by_stream[msg.stream] = first_row.get('values', None)[0]
+                else:
+                    # We are clearing the sheet or headings don't exist
+                    # Write them out to the file
+                    append_to_sheet(service, spreadsheet['spreadsheetId'], range_name, keylist)
+
+                    # Save for sorting values at the end
+                    headers_by_stream[msg.stream] = keylist
 
             lines_by_stream[msg.stream].append(flattened_record)
         elif isinstance(msg, singer.StateMessage):
@@ -730,7 +779,7 @@ def persist_lines(service, spreadsheet, lines, clear_existing_lines):
             inputRecords.append([r.get(x, None) for x in headers_by_stream[msg_stream]])
         result = append(inputRecords) # order by actual headers found in sheet
 
-    return state
+    return [state, headers_by_stream]
 
 
 def collect():
@@ -750,6 +799,12 @@ def collect():
         conn.close()
     except:
         logger.debug('Collection request failed')
+
+# - sheet_config
+#   - sortOrder: Sorts fields in the raw data sheet according to their order in this aarray. Fields
+#       not explicitly named here will be sorted lexically and included after all fields in
+#       sortOrder.
+# - clear_existing_sheet: will remove and replace the raw data sheet if it exists.
 
 
 def main():
@@ -774,19 +829,37 @@ def main():
 
     if 'schema_tab_map' in config:
         STREAM_MAP = config['schema_tab_map']
+        if len(STREAM_MAP) != 1:
+            raise Exception('schema_tab_map must have exactly one item, found {}'\
+                .format(len(STREAM_MAP)))
+
         logger.info('Input stream map: {}'.format(STREAM_MAP))
 
-    clear_existing_lines = False
-    if 'clear_existing_lines' in config:
-        clear_existing_lines = config['clear_existing_lines']
+    sheet_config = None
+    if 'sheet_config' in config:
+        sheet_config = config['sheet_config']
+    else:
+        logger.info('No sheet_config found, skipping pivot tables')
 
+    clear_existing_sheet = False
+    if 'clear_existing_sheet' in config:
+        clear_existing_sheet = config['clear_existing_sheet']
 
     input = io.TextIOWrapper(sys.stdin.buffer, encoding='utf-8')
     state = None
-    # TODO: initialize empty raw data sheet with column order if it doesn't exist
-    state = persist_lines(service, spreadsheet, input, clear_existing_lines)
-    spreadsheet = get_spreadsheet(service, config['spreadsheet_id'])
-    init_pivot_tables(service, spreadsheet)
+
+    rv = persist_lines(service, spreadsheet, input, sheet_config, clear_existing_sheet)
+    state = rv[0]
+    if sheet_config:
+        headers_by_stream = rv[1]
+        vals = headers_by_stream.values()
+        if len(vals) != 1:
+            logger.info('Unexpected != 1 stream with sheet_config for pivot table, number of '\
+                'streams: {}'.format(len(vals)))
+        spreadsheet = get_spreadsheet(service, config['spreadsheet_id'])
+        valIter = iter(vals)
+        headerList = next(valIter)
+        init_pivot_tables(service, spreadsheet, sheet_config, headerList)
     emit_state(state)
     logger.debug("Exiting normally")
 
