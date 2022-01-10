@@ -25,6 +25,9 @@ from oauth2client.file import Storage
 
 MAX_RECORDS = 50000
 
+DEBUG_TRUNCATE_RECORDS = False
+#DEBUG_TRUNCATE_RECORDS = True
+
 try:
     parser = argparse.ArgumentParser(parents=[tools.argparser])
     parser.add_argument('-c', '--config', help='Config file', required=True)
@@ -426,8 +429,10 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
         for fmt in pivot_sheet['conditionalFormats']:
             requests.append(delete_conditional_format(pivot_sheet_id, 0))
             ct += 1
-    
+
     # TODO: clear merged columns or we will have problems if the column count changes
+
+    # TODO: reset any existing cell boders
 
     # Now, put a pivot table in cell A1
     valueList = []
@@ -463,12 +468,21 @@ def init_pivot_table(service, spreadsheet, sheet_config, headerList, table, shou
                 numRows=formatNumRows, startCol=1+totalColCount, numCols=colCount, percentile=percentile))
         for val in valGroup['values']:
             totalColCount += 1
-            valueList.append({
-                'name': val['label'],
-                'summarizeFunction': val['summarizeFunction'] if 'summarizeFunction' in val else
-                    'sum',
-                'formula': val['formula'],
-            })
+            if 'formula' in val:
+                valueList.append({
+                    'name': val['label'],
+                    'summarizeFunction': val['summarizeFunction'] if 'summarizeFunction' in val else
+                        'sum',
+                    'formula': val['formula'],
+                })
+            else:
+                valueList.append({
+                    'name': val['label'],
+                    'summarizeFunction': val['summarizeFunction'] if 'summarizeFunction' in val else
+                        'sum',
+                    'sourceColumnOffset': headerList.index(val['value']),
+                })
+
     # Right border at the end
     requests.append(set_column_left_border(pivot_sheet_id, startCol=1+totalColCount,
         numRows=formatNumRows))
@@ -539,7 +553,7 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
 
         if isinstance(msg, singer.RecordMessage):
             recordCount += 1
-            if recordCount > 100:
+            if DEBUG_TRUNCATE_RECORDS and recordCount > 100:
                 break
             if recordCount % 1000 == 0:
                 logger.info('{} input records received...'.format(recordCount))
@@ -613,7 +627,7 @@ def persist_lines(service, spreadsheet, lines, sheet_config, clear_existing_shee
             range_name)
         records = item[1]
 
-        logger.info("appending {} records for stream '{}'', sheet '{}'".format(len(records), msg_stream, sheet_name))
+        logger.info("appending {} records for stream '{}', sheet '{}'".format(len(records), msg_stream, sheet_name))
 
         inputRecords = []
         for r in records:
